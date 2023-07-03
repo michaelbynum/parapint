@@ -54,7 +54,7 @@ class InertiaCorrectionOptions(ConfigDict):
         self.declare('factor_decrease', ConfigValue(domain=PositiveFloat))
         self.declare('max_coef', ConfigValue(domain=PositiveFloat))
 
-        self.init_coef = 1e-4
+        self.init_coef = 1e-8
         self.factor_increase = 10
         self.factor_decrease = 1/3
         self.max_coef = 1e9
@@ -147,6 +147,8 @@ class IPOptions(ConfigDict):
         self.declare('init_barrier_parameter', ConfigValue(domain=PositiveFloat))
         self.declare('minimum_barrier_parameter', ConfigValue(domain=PositiveFloat))
         self.declare('barrier_decrease', ConfigValue(domain=PositiveFloat))
+        self.declare('barrier_decrease_exponent', ConfigValue(domain=PositiveFloat))
+        self.declare('fraction_to_the_boundary_buffer', ConfigValue(domain=PositiveFloat))
         self.declare('report_timing', ConfigValue(domain=bool))
         self.declare('use_inertia_correction', ConfigValue(domain=bool))
         self.declare('inertia_correction', InertiaCorrectionOptions())
@@ -155,11 +157,13 @@ class IPOptions(ConfigDict):
         self.declare('unified_step', ConfigValue(domain=bool))
         self.declare('error_scaling', ConfigValue(domain=PositiveFloat))
 
-        self.max_iter = 100
+        self.max_iter = 1000
         self.tol = 1e-8
         self.init_barrier_parameter = 0.1
         self.minimum_barrier_parameter = 1e-12
         self.barrier_decrease = 10
+        self.barrier_decrease_exponent = 1.5
+        self.fraction_to_the_boundary_buffer = 0.99
         self.report_timing = False
         self.use_inertia_correction = True
         self.inertia_correction = InertiaCorrectionOptions()
@@ -521,7 +525,7 @@ def ip_solve(interface: BaseInteriorPointInterface,
         if max(primal_inf, dual_inf, complimentarity_inf) \
                 <= options.barrier_decrease * barrier_parameter:
             barrier_parameter = max(options.minimum_barrier_parameter,
-                                    min(0.5 * barrier_parameter, barrier_parameter ** 1.5))
+                                    min(0.5 * barrier_parameter, barrier_parameter ** options.barrier_decrease_exponent))
 
         interface.set_barrier_parameter(barrier_parameter)
         timer.start('eval')
@@ -564,7 +568,10 @@ def ip_solve(interface: BaseInteriorPointInterface,
 
         interface.set_primal_dual_kkt_solution(delta)
         timer.start('frac boundary')
-        alpha_primal_max, alpha_dual_max = fraction_to_the_boundary(interface=interface, tau=1 - barrier_parameter)
+        alpha_primal_max, alpha_dual_max = fraction_to_the_boundary(
+            interface=interface,
+            tau=max(options.fraction_to_the_boundary_buffer, 1 - barrier_parameter)
+        )
         if options.unified_step:
             tmp = min(alpha_primal_max, alpha_dual_max)
             alpha_primal_max = tmp
@@ -620,6 +627,19 @@ def ip_solve(interface: BaseInteriorPointInterface,
         duals_primals_ub += alpha * delta_duals_primals_ub
         duals_slacks_lb += alpha * delta_duals_slacks_lb
         duals_slacks_ub += alpha * delta_duals_slacks_ub
+
+        # sometimes the variables/slacks get too close to their bounds
+        indices = interface.primals_ub() - primals < 1e-14
+        primals[indices] = interface.primals_ub()[indices] - 1e-14
+
+        indices = primals - interface.primals_lb() < 1e-14
+        primals[indices] = interface.primals_lb()[indices] + 1e-14
+
+        indices = interface.ineq_ub() - slacks < 1e-14
+        slacks[indices] = interface.ineq_ub()[indices] - 1e-14
+
+        indices = slacks - interface.ineq_lb() < 1e-14
+        slacks[indices] = interface.ineq_lb()[indices] + 1e-14
 
     timer.stop('IP solve')
     if options.report_timing:
